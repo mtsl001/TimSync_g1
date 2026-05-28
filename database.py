@@ -148,6 +148,35 @@ def get_candles(session_id, ctype='cash'):
         return [dict(r) for r in rows]
 
 
+def get_latest_candles_for_symbol(stock_name: str, ctype: str = 'cash_1') -> list[dict]:
+    """
+    Return candles from the most recent session for a given stock name,
+    regardless of date. Used by live_feed.py to bootstrap historical context
+    on cold-start days when no today-session exists yet.
+
+    Args:
+        stock_name: bare name e.g. 'SBIN' (not 'NSE:SBIN-EQ')
+        ctype:      candle type to fetch, default 'cash_1' (1-min stored by fyers_client)
+
+    Returns:
+        list of candle dicts ordered by idx, or [] if none found.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM sessions WHERE stock_name=? ORDER BY id DESC LIMIT 1",
+            (stock_name,)
+        ).fetchone()
+        if not row:
+            return []
+        session_id = row["id"]
+
+    candles = get_candles(session_id, ctype)
+    # Fallback: try plain 'cash' if the typed variant is empty
+    if not candles:
+        candles = get_candles(session_id, 'cash')
+    return candles
+
+
 # ─── Signals ──────────────────────────────────────────────────────────────────
 
 def store_signals(session_id, sigs):
