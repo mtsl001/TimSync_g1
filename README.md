@@ -27,18 +27,25 @@ The app auto-loads a DEMO session on first launch so you can see everything work
 
 ```
 trading-engine/
-├── app.py              ← Flask server + API routes
-├── database.py         ← SQLite layer (sessions, candles, signals, journal)
+
+├── app.py                  ← Flask server + API routes
+├── database.py             ← SQLite layer (sessions, candles, signals, journal, backtests)
+├── backtest_cli.py         ← Run backtests/optimization from the terminal
+├── live_feed.py            ← Fyers websocket → 1-min candles → live signals
 ├── engine/
-│   ├── strategies.py   ← EMA, VWAP, ATR, ORB, RSI calculations
-│   └── signals.py      ← Multi-strategy signal generation engine
-├── templates/
-│   └── index.html      ← Single-page app template
-├── static/
-│   ├── css/style.css   ← Dark terminal theme
-│   └── js/app.js       ← Frontend logic + TradingView charts
-├── requirements.txt
-└── trading_engine.db   ← Auto-created on first run
+│   ├── config.py           ← Central tunable signal/backtest config
+│   ├── strategies.py       ← EMA, VWAP, ATR, ORB, RSI calculations
+│   ├── signals_v2.py       ← Multi-strategy signal engine (the one used everywhere)
+│   ├── advanced.py         ← HTF trend, S/R, patterns, regime, volume delta
+│   ├── filters.py          ← Time windows, conviction scoring, position sizing
+│   ├── strategies_advanced.py ← F5MC, CVD divergence
+│   ├── backtester.py       ← Walk-forward replay + optimizer (train/test split)
+│   └── data_align.py       ← Timestamp alignment for cash/futures/index feeds
+├── templates/index.html    ← Single-page app template
+├── static/                 ← Dark terminal theme + TradingView charts
+├── tests/                  ← pytest suite (run: pytest -q)
+├── requirements.txt / requirements-dev.txt
+└── trading_engine.db       ← Auto-created on first run
 ```
 
 ---
@@ -97,7 +104,62 @@ datetime,open,high,low,close,volume
 | **Volume Surge**| Candles with 2x+ average session volume             |
 | **Futures Bias**| Cash vs futures premium/discount confirmation       |
 
-Signals fire when combined strategy score ≥ 2.5. All strategies are toggleable.
+
+Plus advanced strategies: **F5MC** (first-5-min momentum) and **CVD divergence**.
+All strategies are toggleable. A signal must clear several quality gates before
+firing (see *Signal Quality & Tuning* below), not just a single score threshold.
+
+---
+
+## Signal Quality & Tuning
+
+The engine is built to emit **few, high-conviction signals**. Every candidate
+must pass, in order: a time-of-day window filter, a minimum directional score,
+a "not muddy" ratio, a minimum number of distinct strategy buckets,
+higher-timeframe (5m/15m) trend alignment, a conviction grade gate (A/B only by
+default), a same-direction cooldown, and a per-day cap.
+
+All knobs live in `engine/config.py` (`DEFAULT_SIGNAL_CONFIG`) and can be
+overridden without touching code by adding a `signal_config` block to
+`fyers_config.json`, e.g.:
+
+```json
+{
+  "signal_config": {
+    "max_signals_per_day": 4,
+    "htf_hard_filter": true,
+    "min_time_mult": 0.5,
+    "threshold": 3.5,
+    "slippage_bps": 3
+  }
+}
+```
+
+Per-request overrides are also accepted via the `signal_config` field in the
+analyze/backtest API bodies. Lower the filters (e.g. `htf_hard_filter: false`,
+`allow_c_grade: true`) for more signals; raise them for fewer/stronger ones.
+
+---
+
+## Backtesting
+
+Walk-forward replay (no look-ahead): at each candle the engine sees only past
+data, and trades are simulated on subsequent candles with configurable slippage
+and brokerage. Metrics include win rate, expectancy, profit factor, max
+drawdown, **annualized Sharpe**, per-day stats and an equity curve.
+
+```bash
+# Backtest an existing session
+python backtest_cli.py --session 3
+
+# Download a symbol from Fyers, then backtest it
+python backtest_cli.py --symbol NSE:SBIN-EQ --from 2024-01-01 --to 2024-01-31
+
+# Grid-search params and validate out-of-sample (train/test split)
+python backtest_cli.py --session 3 --optimize --grid '{"vwap":[true,false],"cvd":[true,false]}'
+```
+
+The web UI runs the same backtest automatically after analysis.
 
 ---
 
@@ -107,7 +169,10 @@ Signals fire when combined strategy score ≥ 2.5. All strategies are toggleable
 |--------|--------------------------|-------------------------------|
 | GET    | `/`                      | Main app UI                   |
 | POST   | `/api/upload`            | Upload CSV data, create session |
-| POST   | `/api/analyze/<id>`      | Run signal engine on session  |
+| POST   | `/api/analyze-v2/<id>`   | Run the signal engine on a session |
+| POST   | `/api/backtest/<id>`     | Walk-forward backtest (persists results) |
+| GET    | `/api/backtests/<id>`    | List saved backtest runs      |
+| POST   | `/api/optimize/<id>`     | Grid search + out-of-sample validation |
 | GET    | `/api/chart-data/<id>`   | OHLCV + indicators + signals  |
 | GET    | `/api/signals/<id>`      | Get signals for session       |
 | GET    | `/api/sessions`          | List all sessions             |
@@ -138,14 +203,15 @@ SL Distance   = 1.5 × ATR(14), adjusted to ORB level
 
 ## Adding Your Own Strategy
 
-Edit `engine/signals.py` and add scoring logic inside the `generate_signals()` loop:
+Edit `engine/signals_v2.py` and add scoring logic inside the `generate_signals_v2()` loop:
 
 ```python
 # Custom: Price makes higher high + higher low (uptrend continuation)
 if config.get('my_strategy'):
-    if candle['high'] > data[i-1]['high'] and candle['low'] > data[i-1]['low']:
-        bs += 1.5
+    if c['high'] > prev['high'] and c['low'] > prev['low']:
+        bull_score += 1.5
         reasons.append('HH/HL Uptrend')
+        strategies_hit.append('my_strategy')
 ```
 
 Then add the toggle in `templates/index.html`:

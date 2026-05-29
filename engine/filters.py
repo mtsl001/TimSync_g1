@@ -37,11 +37,14 @@ TIME_WINDOWS = {
 def get_time_multiplier(candle_time: str) -> tuple[float, str]:
     """
     Get score multiplier based on time of day.
-    candle_time: 'HH:MM' format
+    candle_time: 'HH:MM' or 'YYYY-MM-DD HH:MM' format
     Returns (multiplier, label)
     """
     try:
         parts = candle_time.strip().split(':')
+        # Accept full datetime ('YYYY-MM-DD HH:MM') by taking the time token.
+        token = candle_time.strip().split()[-1] if candle_time else ''
+        parts = token.split(':')
         h, m = int(parts[0]), int(parts[1])
     except (ValueError, IndexError):
         return 1.0, 'Unknown'

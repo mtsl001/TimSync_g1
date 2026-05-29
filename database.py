@@ -93,6 +93,19 @@ def init_db():
                 notes       TEXT,
                 created_at  TEXT    DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS backtests (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+                config       TEXT,   -- JSON: strategy toggles
+                signal_cfg   TEXT,   -- JSON: signal_config overrides used
+                summary      TEXT,   -- JSON: compute_summary output
+                equity_curve TEXT,   -- JSON: cumulative net_pnl list
+                alignment    TEXT,   -- JSON: alignment diagnostics
+                created_at   TEXT    DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_backtests_session ON backtests(session_id);
         """)
     print(f"  DB ready: {DB_PATH}")
 
@@ -270,3 +283,36 @@ def get_journal(session_id=None):
 def delete_journal_entry(entry_id):
     with get_conn() as conn:
         conn.execute("DELETE FROM journal WHERE id=?", (entry_id,))
+
+
+# ─── Backtests ────────────────────────────────────────────────────────────────
+
+def store_backtest(session_id, config, summary, equity_curve, alignment=None, signal_cfg=None):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO backtests
+               (session_id, config, signal_cfg, summary, equity_curve, alignment)
+               VALUES (?,?,?,?,?,?)""",
+            (session_id, json.dumps(config), json.dumps(signal_cfg or {}),
+             json.dumps(summary), json.dumps(equity_curve or []),
+             json.dumps(alignment or {}))
+        )
+        return cur.lastrowid
+
+
+def get_backtests(session_id):
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM backtests WHERE session_id=? ORDER BY id DESC LIMIT 50",
+            (session_id,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            for k in ('config', 'signal_cfg', 'summary', 'equity_curve', 'alignment'):
+                try:
+                    d[k] = json.loads(d[k]) if d.get(k) else None
+                except (json.JSONDecodeError, TypeError):
+                    d[k] = None
+            result.append(d)
+        return result
