@@ -32,7 +32,12 @@ def calc_vwap(data: list[dict]) -> list[float]:
     """Volume Weighted Average Price (resets each session)."""
     cum_tpv, cum_vol = 0.0, 0.0
     result = []
+    prev_day = None
     for d in data:
+        day = d.get('date') or str(d.get('datetime', ''))[:10]
+        if prev_day is not None and day != prev_day:
+            cum_tpv, cum_vol = 0.0, 0.0   # reset at each new session
+        prev_day = day
         tp = (d['high'] + d['low'] + d['close']) / 3
         vol = d.get('volume') or 1
         cum_tpv += tp * vol
