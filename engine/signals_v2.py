@@ -9,7 +9,6 @@ Improved version with:
 5. Fewer low-quality repeat signals
 """
 
-from .config import load_signal_config, candle_day
 from .strategies import calc_ema, calc_vwap, calc_atr, calc_orb
 from .advanced import (
     get_higher_tf_trend,
@@ -33,10 +32,6 @@ from .strategies_advanced import (
     detect_cvd_divergence,
 )
 
-# Module-level defaults are kept for backwards-compat / direct imports, but the
-# live values come from engine.config (file- and call-overridable). See
-# DEFAULT_SIGNAL_CONFIG in engine/config.py.
-
 THRESHOLD = 3.5
 DEDUP_WINDOW = 8
 MIN_SIGNAL_GAP = 25            # min candles between same-direction signals
@@ -57,30 +52,11 @@ def _avg_volume(data: list[dict], upto: int, lookback: int = 60) -> float:
     return max(avg, 1.0)
 
 
-def _grade_tradeable(grade: str, allow_c: bool = ALLOW_C_GRADE) -> bool:
-    if allow_c:
+def _grade_tradeable(grade: str) -> bool:
+    if ALLOW_C_GRADE:
         return grade in ("A", "B", "C")
     return grade in ("A", "B")
 
-def _cap_per_day(signals: list[dict], max_per_day: int) -> list[dict]:
-    """Keep only the top-N highest-score signals per trading day.
-
-    This is the hard ceiling on signal count the user asked for. Applied after
-    de-dup so the survivors are the strongest setups of each day.
-    """
-    if max_per_day <= 0 or not signals:
-        return signals
-    by_day: dict[str, list[dict]] = {}
-    for s in signals:
-        by_day.setdefault(s.get("_day", ""), []).append(s)
-    kept: list[dict] = []
-    for day_sigs in by_day.values():
-        day_sigs.sort(key=lambda x: x["score"], reverse=True)
-        kept.extend(day_sigs[:max_per_day])
-    kept.sort(key=lambda x: x["candle_index"])
-    for s in kept:
-        s.pop("_day", None)
-    return kept
 
 def _has_recent_signal(signals: list[dict], candle_index: int, signal_type: str, gap: int = MIN_SIGNAL_GAP) -> bool:
     for s in reversed(signals):
@@ -128,28 +104,12 @@ def generate_signals_v2(
     capital: float = 25000,
     risk_per_trade: float = 500,
     index_data: list[dict] | None = None,
-    sig_cfg: dict | None = None,
 ) -> list[dict]:
     """
     Generate enhanced signals with stronger anti-noise filters.
-    
-    sig_cfg: optional overrides for engine.config.DEFAULT_SIGNAL_CONFIG
-             (also read from fyers_config.json's "signal_config" block).
     """
     if not cash_data or len(cash_data) < 25:
         return []
-
-    scfg = load_signal_config(sig_cfg)
-    threshold       = scfg["threshold"]
-    muddy_ratio     = scfg["muddy_ratio"]
-    min_strategies  = scfg["min_strategies"]
-    allow_c         = scfg["allow_c_grade"]
-    b_min_score     = scfg["b_grade_min_score"]
-    dedup_window    = scfg["dedup_window"]
-    min_signal_gap  = scfg["min_signal_gap"]
-    max_per_day     = scfg["max_signals_per_day"]
-    htf_hard_filter = scfg["htf_hard_filter"]
-    min_time_mult   = scfg["min_time_mult"]
 
     ema9 = calc_ema(cash_data, 9)
     ema21 = calc_ema(cash_data, 21)
@@ -175,8 +135,8 @@ def generate_signals_v2(
         c = cash_data[i]
         prev = cash_data[i - 1]
 
-        time_mult, time_label = get_time_multiplier(c.get("time") or c.get("datetime", ""))
-        if time_mult < min_time_mult:
+        time_mult, time_label = get_time_multiplier(c.get("datetime", ""))
+        if time_mult <= 0.0:
             continue
 
         avg_vol = _avg_volume(cash_data, i, 60)
@@ -329,7 +289,7 @@ def generate_signals_v2(
         if not reasons:
             continue
 
-        if bull_score < threshold and bear_score < threshold:
+        if bull_score < THRESHOLD and bear_score < THRESHOLD:
             continue
 
         is_bull = bull_score >= bear_score
@@ -338,12 +298,12 @@ def generate_signals_v2(
         opposite_score = min(bull_score, bear_score)
 
         # Reject muddy candles where both sides are close
-        if opposite_score > 0 and directional_score / max(opposite_score, 0.1) < muddy_ratio:
+        if opposite_score > 0 and directional_score / max(opposite_score, 0.1) < 1.35:
             continue
 
-        # Require enough distinct strategy buckets for a valid signal
+        # Require at least 2 strategy buckets for a valid signal
         unique_strategies = sorted(set(strategies_hit))
-        if len(unique_strategies) < min_strategies:
+        if len(unique_strategies) < MIN_STRATEGIES_FOR_SIGNAL:
             continue
 
         entry = c["close"]
@@ -367,10 +327,6 @@ def generate_signals_v2(
             htf_aligned = True
         elif (not is_bull) and htf_15m == "BEARISH":
             htf_aligned = True
-
-       # Hard filter: only trade with the higher-timeframe trend.
-        if htf_hard_filter and not htf_aligned:
-            continue
 
         patterns = detect_patterns(cash_data, i)
         pattern_confirmed = False
@@ -412,7 +368,7 @@ def generate_signals_v2(
             elif (not is_bull) and rs < 0.8:
                 reasons.append(f"RS weak {rs}x")
 
-        base_score = min(100, round(((directional_score - threshold) / 4.5) * 100))
+        base_score = min(100, round(((directional_score - THRESHOLD) / 4.5) * 100))
         conviction = calc_conviction_score(
             base_score=base_score,
             time_mult=time_mult,
@@ -425,19 +381,18 @@ def generate_signals_v2(
             momentum_quality=momentum["score"],
         )
 
-        if not _grade_tradeable(conviction["grade"], allow_c):
+        if not _grade_tradeable(conviction["grade"]):
             continue
 
         # Stronger A/B quality gate
-        if conviction["grade"] == "B" and conviction["score"] < b_min_score:
+        if conviction["grade"] == "B" and conviction["score"] < 68:
             continue
 
-        # A-grade must be backed by genuine confluence
-        if conviction["grade"] == "A" and len(set(unique_strategies)) < 3:
+        if conviction["grade"] == "A" and len(set(unique_strategies)) < 2:
             continue
 
         # Same-direction cooldown
-        if _has_recent_signal(accepted, i, side, min_signal_gap):
+        if _has_recent_signal(accepted, i, side, MIN_SIGNAL_GAP):
             continue
 
         # Entry / exits
@@ -501,12 +456,10 @@ def generate_signals_v2(
             "size_pct": pos["size_pct"],
             "strategy_count": len(set(unique_strategies)),
             "base_directional_score": round(directional_score, 2),
-            "_day": candle_day(c),
         }
 
         raw.append(signal)
         accepted.append(signal)
 
-    final = _dedup_signals_directional(raw, window=dedup_window)
-    final = _cap_per_day(final, max_per_day)
+    final = _dedup_signals_directional(raw, window=DEDUP_WINDOW)
     return final

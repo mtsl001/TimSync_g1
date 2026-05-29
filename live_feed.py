@@ -39,8 +39,6 @@ from fyers_client import load_config, FyersClient
 from engine.signals_v2 import generate_signals_v2
 from engine.strategies import calc_orb
 
-from engine.config import load_signal_config
-
 logging.basicConfig(level=logging.WARNING)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -150,9 +148,6 @@ class SignalProcessor:
         self.risk        = risk
         self.signal_log  = []   # All signals fired today
         self._lock       = threading.Lock()
-        self._sig_cfg    = load_signal_config()
-        self._seen       = defaultdict(set)   # symbol → {(time, type, entry)}
-        self._last_alert = {}                 # symbol → datetime of last alert
 
     def load_history(self, symbol: str, candles: list[dict]):
         """Pre-load historical candles for a symbol."""
@@ -185,8 +180,7 @@ class SignalProcessor:
         # Run V2 signal engine on last 200 candles (enough for context)
         window = data[-200:]
         signals = generate_signals_v2(
-            window, None, STRATEGY_CONFIG, self.capital, self.risk,
-            sig_cfg=self._sig_cfg,
+            window, None, STRATEGY_CONFIG, self.capital, self.risk
         )
 
         # Check if newest candle triggered a signal
@@ -196,21 +190,6 @@ class SignalProcessor:
         latest = signals[-1]
         if latest['candle_index'] < len(window) - 3:
             return  # Signal is old, not on latest candle
-
-
-        # Identity-based de-dup: never re-alert the same signal across candles.
-        key = (latest.get('time'), latest['type'], round(latest['entry'], 2))
-        if key in self._seen[symbol]:
-            return
-
-        # Per-symbol cooldown: suppress rapid back-to-back alerts.
-        cooldown_min = self._sig_cfg.get('per_symbol_cooldown_min', 0)
-        last = self._last_alert.get(symbol)
-        if last and (datetime.now() - last).total_seconds() < cooldown_min * 60:
-            return
-
-        self._seen[symbol].add(key)
-        self._last_alert[symbol] = datetime.now()
 
         # New signal — alert!
         self._alert(symbol, latest, candle)

@@ -112,10 +112,11 @@ modules_ok = True
 checks = [
     ('database',             'import database'),
     ('strategies',           'from engine.strategies import compute_all'),
+    ('signals V1',           'from engine.signals import generate_signals'),
     ('signals V2',           'from engine.signals_v2 import generate_signals_v2'),
     ('advanced indicators',  'from engine.advanced import detect_patterns'),
     ('filters',              'from engine.filters import get_time_multiplier'),
-    ('backtester',           'from engine.backtester import backtest_session_replay'),
+    ('backtester',           'from engine.backtester import backtest_session'),
     ('fyers client',         'from fyers_client import FyersClient'),
     ('flask app',            'from app import app'),
 ]

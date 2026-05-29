@@ -12,9 +12,9 @@ from datetime import datetime
 from flask import Flask, request, jsonify, render_template
 import database as db
 from engine.strategies import compute_all, calc_orb
-# from engine.signals import generate_signals
+from engine.signals import generate_signals
 from engine.signals_v2 import generate_signals_v2
-from engine.backtester import backtest_session_replay, optimize_with_holdout
+from engine.backtester import backtest_session
 from engine.advanced import find_support_resistance, analyze_opening_gap
 from engine.filters import detect_market_regime
 
@@ -106,6 +106,27 @@ def upload():
     })
 
 
+@app.route('/api/analyze/<int:session_id>', methods=['POST'])
+def analyze(session_id):
+    session = db.get_session(session_id)
+    if not session:
+        return jsonify({'error': 'Session not found'}), 404
+
+    config = request.get_json(force=True).get('strategies', {
+        'orb': True, 'ema': True, 'vwap': True, 'volume': True, 'futures': False,
+    })
+
+    cash    = db.get_candles(session_id, 'cash')
+    futures = db.get_candles(session_id, 'futures')
+
+    sigs = generate_signals(cash, futures or None, config, session['capital'], session['risk'])
+
+    db.clear_signals(session_id)
+    db.store_signals(session_id, sigs)
+
+    return jsonify({'signals': sigs, 'count': len(sigs)})
+
+
 @app.route('/api/analyze-v2/<int:session_id>', methods=['POST'])
 def analyze_v2(session_id):
     """Enhanced V2 analysis with all advanced filters."""
@@ -128,8 +149,7 @@ def analyze_v2(session_id):
 
     sigs = generate_signals_v2(
         cash, futures or None, config,
-        session['capital'], session['risk'], index_d or None,
-        sig_cfg=body.get('signal_config'),
+        session['capital'], session['risk'], index_d or None
     )
 
     db.clear_signals(session_id)
@@ -170,63 +190,14 @@ def backtest(session_id):
         'orb': True, 'ema': True, 'vwap': True, 'volume': True, 'futures': False,
     })
 
-    cash    = db.get_candles(session_id, 'cash') or db.get_candles(session_id, 'cash_1')
-    futures = db.get_candles(session_id, 'futures') or db.get_candles(session_id, 'futures_1')
-    index_d = db.get_candles(session_id, 'index_1')
+    cash    = db.get_candles(session_id, 'cash')
+    futures = db.get_candles(session_id, 'futures')
 
-    sig_cfg = body.get('signal_config')
-    result = backtest_session_replay(
+    result = backtest_session(
         cash, futures or None, config,
-        session['capital'], session['risk'], index_d or None,
-        sig_cfg=sig_cfg,
+        session['capital'], session['risk']
     )
 
-    # Persist for later comparison.
-    db.store_backtest(
-        session_id, config, result.get('summary', {}),
-        result.get('summary', {}).get('equity_curve', []),
-        result.get('alignment'), sig_cfg,
-    )
-
-    return jsonify(result)
-
-
-@app.route('/api/backtests/<int:session_id>', methods=['GET'])
-def list_backtests(session_id):
-    """List saved backtest runs for a session (newest first)."""
-    return jsonify({'backtests': db.get_backtests(session_id)})
-
-
-@app.route('/api/optimize/<int:session_id>', methods=['POST'])
-def optimize(session_id):
-    """Grid-search strategy params on training days, validate out-of-sample."""
-    session = db.get_session(session_id)
-    if not session:
-        return jsonify({'error': 'Session not found'}), 404
-
-    body = request.get_json(force=True)
-    base_config = body.get('strategies', {
-        'orb': True, 'ema': True, 'vwap': True, 'volume': True, 'futures': False,
-    })
-    param_grid = body.get('param_grid', {
-        'vwap': [True, False], 'volume': [True, False],
-        'f5mc': [True, False], 'cvd': [True, False],
-    })
-    train_frac = float(body.get('train_frac', 0.7))
-    top_n = int(body.get('top_n', 5))
-
-    cash    = db.get_candles(session_id, 'cash') or db.get_candles(session_id, 'cash_1')
-    futures = db.get_candles(session_id, 'futures') or db.get_candles(session_id, 'futures_1')
-    index_d = db.get_candles(session_id, 'index_1')
-
-    if not cash:
-        return jsonify({'error': 'No cash data found for this session'}), 404
-
-    result = optimize_with_holdout(
-        cash, futures or None, base_config, param_grid,
-        session['capital'], session['risk'], index_d or None,
-        top_n=top_n, train_frac=train_frac,
-    )
     return jsonify(result)
 
 
